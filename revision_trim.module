@@ -1,0 +1,155 @@
+<?php
+
+
+/**
+ * Implements hook_permission().
+ *
+ * {@inheritdoc}
+ */
+function revision_trim_permission() {
+  return array(
+    'administer revision trim' => array(
+      'title' => t('Administer Revision Trim'),
+      'description' => t('Edit configuration and run Revision Trim.'),
+    ),
+  );
+}
+
+/**
+ * Implements hook_menu().
+ *
+ * {@inheritdoc}
+ */
+function revision_trim_menu() {
+  $items = array();
+  $items['admin/config/content/revision-trim'] = array(
+    'title' => 'Revision Trim',
+    'description' => 'Revision Trim Settings',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => ['revision_trim_settings_form'],
+    'access arguments' => ['administer revision trim'],
+    'file' => 'revision_trim.admin.inc',
+  );
+  return $items;
+}
+
+/**
+ * Implements hook_cronapi() from Elysia Cron module.
+ *
+ * {@inheritdoc}
+ */
+function revision_trim_cronapi($op, $job = NULL) {
+  $items['revision_trim_delete_revisions'] = array(
+    'description' => 'Process Revision Trim on a Node',
+    //'rule' => '0 */2 * * *', // Every 2 hours
+  );
+  return $items;
+}
+
+/**
+ * Get a node and delete revisions.
+ */
+function revision_trim_delete_revisions() {
+
+  // Get vars
+  // node types to trim, x-amount to keep, age to trim after
+  $trimTypes = variable_get('revision_trim_types', []);
+  // This doesn't count the published version.
+  $trimCount = variable_get('revision_trim_count', 100);
+  $trimAge   = (int) variable_get('revision_trim_age', 90); // force integer
+  $trimNid   = (int) variable_get('revision_trim_nid', 0); // force integer
+  $skipAge   = empty($trimAge) ? TRUE : FALSE; // if user enters zero, don't use age as a condition
+
+  // Get nid from settings or from query.
+  if(!empty($trimNid)) {
+    $nid = $trimNid;
+    watchdog('Revision Trim', 'Trim specific nid :nid.', [':nid' => $nid], WATCHDOG_INFO);
+  }
+  else {
+    // Get one node per query.
+    // Age is checked on each revision (if skipAge == FALSE)
+    // but used here to filter out previously trimmed nodes.
+    $sql = 'select n.nid from {node} n '
+      .'left join {node_revision} nr ON n.nid = nr.nid '
+      .'where n.type IN (:types)';
+    $args = [
+      ':types'  => $trimTypes,
+      ':amount' => $trimCount,
+    ];
+    if(!$skipAge) {
+      $sql .= 'AND nr.timestamp < UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL :age DAY))';
+      $args[':age'] = $trimAge;
+    }
+    $sql .= 'group by n.nid '
+      .'having count(nr.nid) > :amount '
+      .'order by count(nr.nid) DESC '
+      .'limit 1';
+    $nid = db_query($sql, $args)->fetchField();
+  }
+
+  // Load node and delete revisions.
+  if(!empty($nid)) {
+    $node = node_load($nid);
+
+    if (isset($trimCount) && isset($node->nid)) {
+      $nid = $node->nid;
+      $node_data = db_query('SELECT * FROM {node} WHERE nid = :nid', array(':nid' => $nid));
+
+      foreach ($node_data as $node_details) {
+        // Don't max out script.
+        ini_set('max_execution_time', 0);
+
+        $revision_data = node_revision_list($node_details);
+        // Compatible with workbench moderation module.
+        if (module_exists('workbench_moderation')) {
+
+          // Don't trim nodes without a published version.
+          if (isset($node->workbench_moderation['published']->vid)) {
+            foreach ($revision_data as $revision) {
+
+              // Get timestamp of x-amount of time (-90 days) from today.
+              $dateLine = date_create();
+              date_sub($dateLine, date_interval_create_from_date_string($trimAge . ' days'));
+
+              // Uncomment var for xdebug testing.
+              //$revTime = date('m/d/Y', $revision->timestamp);
+
+              // Make sure this revision in loop isn't the published one.
+              // We can delete this if revision date is before dateline.
+              if ($node->workbench_moderation['published']->vid != $revision->vid
+                && ( ($revision->timestamp < $dateLine->getTimestamp()) || ($skipAge == TRUE))
+              ) {
+                $revision_ids[] = $revision->vid;
+              }
+            }
+            $node_to_restrict = array_slice($revision_ids, $trimCount, count($revision_ids));
+            foreach ($node_to_restrict as $revision_id) {
+              node_revision_delete($revision_id);
+            }
+            watchdog('Revision Trim', 'Node id :nid (under Workbench Moderation) was trimmed by :count revisions.', [':nid' => $nid, ':count' => count($node_to_restrict)], WATCHDOG_INFO);
+          }
+        }
+        else {
+          // Nodes not using workbench.
+          foreach ($revision_data as $revision) {
+
+            // Get timestamp of x-amount of time (-90 days) from today.
+            $dateLine = date_create();
+            date_sub($dateLine, date_interval_create_from_date_string($trimAge . ' days'));
+
+            // Make sure this revision in loop isn't the published one.
+            // We can delete this if revision date is before dateline.
+            if ($revision->timestamp < $dateLine->getTimestamp()) {
+              $revision_ids[] = $revision->vid;
+            }
+          }
+          $node_to_restrict = array_slice($revision_ids, $trimCount, count($revision_ids));
+          foreach ($node_to_restrict as $revision_id) {
+            node_revision_delete($revision_id);
+          }
+          watchdog('Revision Trim', 'Node id :nid (not under Workbench Moderation) was trimmed by :count revisions.', [':nid' => $nid, ':count' => count($node_to_restrict)], WATCHDOG_INFO);
+        }
+      }
+    }
+  }
+}

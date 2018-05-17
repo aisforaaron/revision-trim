@@ -1,0 +1,5 @@
+name = Revision Trim
+description = "Delete x-amount of revisions on a node under Workbench Moderation."
+core = 7.x
+configure = admin/config/content/revision-trim
+dependencies[] = elysia_cron
