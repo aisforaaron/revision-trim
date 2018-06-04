@@ -56,25 +56,30 @@ function revision_trim_delete_revisions() {
   $trimTypes = variable_get('revision_trim_types', []);
   // This doesn't count the published version.
   $trimCount = variable_get('revision_trim_count', 100);
-  $trimAge   = (int) variable_get('revision_trim_age', 90); // force integer
+  $trimAge   = (int) variable_get('revision_trim_age', 0); // force integer
   $trimNid   = (int) variable_get('revision_trim_nid', 0); // force integer
   $skipAge   = empty($trimAge) ? TRUE : FALSE; // if user enters zero, don't use age as a condition
+  $trimSkipNids = variable_get('revision_trim_skip_nids', [0]);
+  $trimSkip = !empty($trimSkipNids) ? explode(', ', trim($trimSkipNids)) : [0];
 
   // Get nid from settings or from query.
   if(!empty($trimNid)) {
     $nid = $trimNid;
     watchdog('Revision Trim', 'Trim specific nid :nid.', [':nid' => $nid], WATCHDOG_INFO);
   }
-  else {
+  else if(!empty($trimTypes)) {
     // Get one node per query.
     // Age is checked on each revision (if skipAge == FALSE)
     // but used here to filter out previously trimmed nodes.
     $sql = 'select n.nid from {node} n '
       .'left join {node_revision} nr ON n.nid = nr.nid '
-      .'where n.type IN (:types)';
+      .'where n.type IN (:types) '
+      .'AND n.status <> 0 '
+      .'AND n.nid NOT IN (:skipNids)';
     $args = [
       ':types'  => $trimTypes,
-      ':amount' => $trimCount,
+      ':amount' => $trimCount + 1,
+      ':skipNids' => $trimSkip
     ];
     if(!$skipAge) {
       $sql .= 'AND nr.timestamp < UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL :age DAY))';
@@ -85,6 +90,10 @@ function revision_trim_delete_revisions() {
       .'order by count(nr.nid) DESC '
       .'limit 1';
     $nid = db_query($sql, $args)->fetchField();
+  }
+  else {
+    $nid = 0; // Nid wasn't set in form or content types not selected yet.
+    watchdog('Revision Trim', 'No nid found, probably due to the Revision Trim settings form missing content types.', [], WATCHDOG_INFO);
   }
 
   // Load node and delete revisions.
@@ -115,30 +124,42 @@ function revision_trim_delete_revisions() {
               //$revTime = date('m/d/Y', $revision->timestamp);
 
               // Make sure this revision in loop isn't the published one.
-              // We can delete this if revision date is before dateline.
+              // && that the revision id is older (less than) the published vid,
+              //   which means it's not a new revision currently in draft.
+              // && the revision date is before dateline || we are skipping the age.
               if ($node->workbench_moderation['published']->vid != $revision->vid
+                && $node->workbench_moderation['published']->vid > $revision->vid
                 && ( ($revision->timestamp < $dateLine->getTimestamp()) || ($skipAge == TRUE))
               ) {
                 $revision_ids[] = $revision->vid;
               }
             }
+            // Out of the revisions that meet the date condition
+            // only delete a certain number of them (the trimCount).
             $node_to_restrict = array_slice($revision_ids, $trimCount, count($revision_ids));
+            // Delete oldest first
+            sort($node_to_restrict);
+            // Loop through revisions and delete.
             foreach ($node_to_restrict as $revision_id) {
               node_revision_delete($revision_id);
+              // Remove deleted revisions from Workbench History table.
+              db_delete('workbench_moderation_node_history')
+                ->condition('vid', $revision_id)
+                ->execute();
             }
             watchdog('Revision Trim', 'Node id :nid (under Workbench Moderation) was trimmed by :count revisions.', [':nid' => $nid, ':count' => count($node_to_restrict)], WATCHDOG_INFO);
           }
         }
         else {
           // Nodes not using workbench.
+          $revision_ids = [];
           foreach ($revision_data as $revision) {
-
             // Get timestamp of x-amount of time (-90 days) from today.
             $dateLine = date_create();
             date_sub($dateLine, date_interval_create_from_date_string($trimAge . ' days'));
 
-            // Make sure this revision in loop isn't the published one.
             // We can delete this if revision date is before dateline.
+            // We will only get here if node is published.
             if ($revision->timestamp < $dateLine->getTimestamp()) {
               $revision_ids[] = $revision->vid;
             }
