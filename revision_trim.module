@@ -110,7 +110,9 @@ function revision_trim_delete_revisions() {
 
         $revision_data = node_revision_list($node_details);
         // Compatible with workbench moderation module.
-        if (module_exists('workbench_moderation')) {
+        // Check if module exists/enabled and node is using it.
+        if (module_exists('workbench_moderation')
+          && isset($node->workbench_moderation)) {
 
           // Don't trim nodes without a published version.
           if (isset($node->workbench_moderation['published']->vid)) {
@@ -164,6 +166,8 @@ function revision_trim_delete_revisions() {
               $revision_ids[] = $revision->vid;
             }
           }
+          // Add one to trim to not include published version in count.
+          $trimCount++;
           $node_to_restrict = array_slice($revision_ids, $trimCount, count($revision_ids));
           foreach ($node_to_restrict as $revision_id) {
             node_revision_delete($revision_id);
